@@ -1,0 +1,47 @@
+# Configuracion CIFAR-10 fiel al paper Ho et al. 2020
+# Seccion 4, Tabla 1
+
+dataset:
+  name: cifar10
+  image_size: 32
+  image_channels: 3
+  data_root: ./data/raw
+  batch_size: 128
+  num_workers: 8
+  val_fraction: 0.1
+
+diffusion:
+  num_timesteps: 1000
+  schedule: linear          # linear | cosine | sigmoid
+  beta_start: 0.0001
+  beta_end: 0.02
+
+model:
+  base_channels: 128        # ch
+  channel_multipliers: [1, 2, 2, 2]   # ch_mult
+  num_res_blocks: 2
+  attention_resolutions: [16]
+  dropout: 0.1
+  num_groups: 32            # grupos para GroupNorm
+
+ema:
+  decay: 0.9999
+  warmup_steps: 0
+
+training:
+  learning_rate: 0.0002     # 2e-4
+  total_steps: 800000       # paper: 800k pasos en TPU v3-8
+  grad_clip_max_norm: 1.0
+  use_amp: true             # automatic mixed precision
+
+  log_every_n_steps: 100
+  save_every_n_steps: 5000
+  sample_every_n_steps: 10000
+  val_every_n_steps: 1000
+
+  checkpoint_dir: ./checkpoints/cifar10
+
+sampling:
+  num_samples_for_fid: 50000   # protocolo correcto: 50k muestras
+  num_display_samples: 64
+  ddim_steps: [1000, 250, 100, 50, 20, 10]   # curva FID vs pasos

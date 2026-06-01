@@ -1,0 +1,32 @@
+# DDPM desde cero — Proyecto Final Aprendizaje Profundo
+# Instalar con: pip install -r requirements.txt
+
+# Core deep learning
+torch>=2.1.0
+torchvision>=0.16.0
+torchaudio>=2.1.0
+
+# Metricas de evaluacion (FID, IS, NLL)
+torchmetrics[image]>=1.2.0
+
+# Demo interactiva
+gradio>=4.0.0
+
+# Configuracion y logging
+pyyaml>=6.0
+tensorboard>=2.14.0
+
+# Ciencia de datos y visualizacion
+numpy>=1.24.0
+matplotlib>=3.8.0
+Pillow>=10.0.0
+tqdm>=4.66.0
+scipy>=1.11.0
+
+# Notebook
+jupyter>=1.0.0
+ipykernel>=6.25.0
+ipywidgets>=8.0.0
+
+# Desarrollo
+black>=23.0.0
