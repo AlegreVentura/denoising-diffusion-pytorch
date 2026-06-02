@@ -69,16 +69,16 @@ class DDIMSampler:
         )
         self.ddim_sqrt_one_minus_alphas = np.sqrt(1.0 - self.ddim_alphas_cumprod)
 
-        # Varianza sigma_t para eta != 0
-        sigmas_squared = (
-            self.eta
-            * np.sqrt(
-                (1 - self.ddim_alphas_cumprod_prev)
-                / (1 - self.ddim_alphas_cumprod)
+        # sigma_t = eta * sqrt( (1-alpha_prev)/(1-alpha_t) * (1 - alpha_t/alpha_prev) )
+        # Ec. 16 de Song et al. (2021). El producto bajo la raiz es siempre >= 0
+        # porque alpha_prev >= alpha_t (mayor t = menor alpha_bar).
+        self.ddim_sigmas = self.eta * np.sqrt(
+            np.maximum(0.0,
+                (1.0 - self.ddim_alphas_cumprod_prev)
+                / np.maximum(1.0 - self.ddim_alphas_cumprod, 1e-8)
+                * (1.0 - self.ddim_alphas_cumprod / np.maximum(self.ddim_alphas_cumprod_prev, 1e-8))
             )
-            * np.sqrt(1 - self.ddim_alphas_cumprod / self.ddim_alphas_cumprod_prev)
         )
-        self.ddim_sigmas = np.sqrt(sigmas_squared)
 
     @torch.no_grad()
     def ddim_step(
@@ -115,11 +115,9 @@ class DDIMSampler:
         x0_predicted = np.clip(x0_predicted, -1.0, 1.0)
         x0_predicted_tensor = torch.from_numpy(x0_predicted).to(x_t.device)
 
-        # Componente de "direccion hacia x_t"
-        direction_pointing_to_xt = (
-            np.sqrt(1.0 - alpha_bar_t_prev - sigma_t ** 2)
-            * predicted_noise.cpu().numpy()
-        )
+        # Componente de "direccion hacia x_t" (clamped a 0 para evitar sqrt negativo)
+        direction_coeff = np.maximum(0.0, 1.0 - alpha_bar_t_prev - sigma_t ** 2)
+        direction_pointing_to_xt = np.sqrt(direction_coeff) * predicted_noise.cpu().numpy()
         direction_tensor = torch.from_numpy(direction_pointing_to_xt).to(x_t.device)
 
         # Componente deterministico

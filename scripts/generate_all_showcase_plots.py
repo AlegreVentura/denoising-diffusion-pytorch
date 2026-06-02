@@ -1,6 +1,15 @@
 """Genera todas las graficas posibles del proyecto con los checkpoints actuales.
 
-Uso:
+Uso basico (procesa MNIST y CIFAR-10 con los checkpoints por defecto):
+    python scripts/generate_all_showcase_plots.py
+
+Solo MNIST:
+    python scripts/generate_all_showcase_plots.py --dataset mnist
+
+Solo CIFAR-10 con un checkpoint especifico (ej: al llegar a 100k pasos):
+    python scripts/generate_all_showcase_plots.py --dataset cifar10 --checkpoint checkpoints/cifar10/step_0100000.pt
+
+Con ventana de visualizacion ademas de guardar:
     python scripts/generate_all_showcase_plots.py --show
 
 Produce en checkpoints/mnist/plots/ y checkpoints/cifar10/plots/:
@@ -14,11 +23,14 @@ Produce en checkpoints/mnist/plots/ y checkpoints/cifar10/plots/:
     05_reverse_chain_mnist.png    cadena inversa: ruido -> digito
     06_ddim_vs_ddpm_mnist.png     comparativa velocidad y calidad
     07_interpolation_mnist.png    interpolacion en espacio latente
-  [CIFAR-10 - checkpoint parcial]
-    08_samples_cifar10.png        muestras con el checkpoint actual
-    09_sample_evolution_cifar.png progresion desde paso 1k hasta actual
+  [CIFAR-10 - checkpoint parcial o completo]
+    08_samples_cifar10.png        muestras con el checkpoint indicado
+    09_sample_evolution_cifar.png progresion desde paso 1k hasta el actual
 """
-import sys, os, argparse
+import sys
+import os
+import argparse
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
@@ -32,456 +44,522 @@ from ddpm.diffusion import make_linear_beta_schedule
 from extras.ablation_schedules import NoiseScheduleAblation
 from extras.latent_interpolation import LatentSpaceInterpolator
 from utils.checkpointing import load_checkpoint
-from scripts.plot_style import apply_dark_style, BACKGROUND_DARK, AXES_BACKGROUND, TEXT_PRIMARY, TEXT_SECONDARY, BORDER_COLOR, COLOR_INDIGO, COLOR_BLUE, COLOR_AMBER, COLOR_EMERALD, COLOR_ROSE, COLOR_VIOLET, tensor_to_uint8_image
+from scripts.plot_style import (
+    apply_dark_style,
+    BACKGROUND_DARK,
+    AXES_BACKGROUND,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+    BORDER_COLOR,
+    COLOR_INDIGO,
+    COLOR_BLUE,
+    COLOR_AMBER,
+    COLOR_EMERALD,
+    COLOR_ROSE,
+    COLOR_VIOLET,
+    tensor_to_uint8_image,
+)
 from scripts import viz_diffusion, viz_ablation, viz_metrics
 
 apply_dark_style()
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def save(fig, path, show):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fig.savefig(path, dpi=130, bbox_inches="tight")
-    print(f"  -> {path}")
-    if show:
+def save_figure(figure, output_path, show_after_saving):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    figure.savefig(output_path, dpi=130, bbox_inches="tight")
+    print(f"  -> {output_path}")
+    if show_after_saving:
         plt.show()
     else:
-        plt.close(fig)
+        plt.close(figure)
 
 
 def load_model_from_config(config_path, checkpoint_path, device):
-    with open(config_path) as f:
-        cfg = yaml.safe_load(f)
-    mc = cfg["model"]
+    with open(config_path) as config_file:
+        config = yaml.safe_load(config_file)
+    model_config = config["model"]
     model = UNet(
-        image_channels=cfg["dataset"]["image_channels"],
-        base_channels=mc["base_channels"],
-        channel_multipliers=tuple(mc["channel_multipliers"]),
-        num_res_blocks=mc["num_res_blocks"],
-        attention_resolutions=tuple(mc["attention_resolutions"]),
-        dropout=mc["dropout"],
-        num_groups=mc["num_groups"],
+        image_channels=config["dataset"]["image_channels"],
+        base_channels=model_config["base_channels"],
+        channel_multipliers=tuple(model_config["channel_multipliers"]),
+        num_res_blocks=model_config["num_res_blocks"],
+        attention_resolutions=tuple(model_config["attention_resolutions"]),
+        dropout=model_config["dropout"],
+        num_groups=model_config["num_groups"],
     ).to(device)
     ema = ExponentialMovingAverage.from_model(model)
     load_checkpoint(checkpoint_path, model, ema, device=device)
     ema.copy_to(model.parameters())
     model.eval()
     betas = make_linear_beta_schedule(
-        cfg["diffusion"]["num_timesteps"],
-        cfg["diffusion"]["beta_start"],
-        cfg["diffusion"]["beta_end"],
+        config["diffusion"]["num_timesteps"],
+        config["diffusion"]["beta_start"],
+        config["diffusion"]["beta_end"],
     )
     diffusion = GaussianDiffusion(betas)
-    return model, diffusion, cfg
+    return model, diffusion, config
 
 
-def make_image_grid(image_tensors, nrows, ncols, title, caption_list=None):
-    num = min(len(image_tensors), nrows * ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 1.6, nrows * 1.6 + 0.5))
-    fig.patch.set_facecolor(BACKGROUND_DARK)
-    axes_flat = axes.flatten() if nrows * ncols > 1 else [axes]
-    for idx in range(nrows * ncols):
-        ax = axes_flat[idx]
+def make_image_grid_figure(image_tensors, num_rows, num_cols, title, caption_list=None):
+    num_images_to_show = min(len(image_tensors), num_rows * num_cols)
+    figure, axes = plt.subplots(num_rows, num_cols, figsize=(num_cols * 1.6, num_rows * 1.6 + 0.5))
+    figure.patch.set_facecolor(BACKGROUND_DARK)
+    axes_flat = axes.flatten() if num_rows * num_cols > 1 else [axes]
+    for cell_idx in range(num_rows * num_cols):
+        ax = axes_flat[cell_idx]
         ax.set_facecolor(BACKGROUND_DARK)
         ax.axis("off")
-        if idx < num:
-            t = image_tensors[idx]
-            if t.shape[0] == 1:
-                t = t.repeat(3, 1, 1)
-            ax.imshow(tensor_to_uint8_image(t))
-            if caption_list and idx < len(caption_list):
-                ax.set_title(caption_list[idx], color=TEXT_SECONDARY, fontsize=7, pad=2)
-    fig.suptitle(title, color=TEXT_PRIMARY, fontsize=12, fontweight="bold", y=1.01)
+        if cell_idx < num_images_to_show:
+            image_tensor = image_tensors[cell_idx]
+            if image_tensor.shape[0] == 1:
+                image_tensor = image_tensor.repeat(3, 1, 1)
+            ax.imshow(tensor_to_uint8_image(image_tensor))
+            if caption_list and cell_idx < len(caption_list):
+                ax.set_title(caption_list[cell_idx], color=TEXT_SECONDARY, fontsize=7, pad=2)
+    figure.suptitle(title, color=TEXT_PRIMARY, fontsize=12, fontweight="bold", y=1.01)
     plt.tight_layout(pad=0.15)
-    return fig
+    return figure
 
 
-# ---------------------------------------------------------------------------
-# 01 - Comparativa de schedules (sin modelo)
-# ---------------------------------------------------------------------------
-
-def plot_noise_schedules(out_dir, show):
+def plot_noise_schedules(output_dir, show_after_saving):
     print("\n[1/9] Comparativa de schedules de ruido...")
     ablation = NoiseScheduleAblation(1000)
-    data = {}
-    for name in ("linear", "cosine", "sigmoid"):
-        d = ablation.diffusion_objects[name]
-        ab = d.alphas_cumprod.numpy()
-        data[name] = {
-            "timesteps": np.arange(1000),
-            "betas": d.betas.numpy(),
-            "alphas_cumprod": ab,
-            "snr": ab / (1.0 - ab + 1e-8),
+    schedules_plot_data = {}
+    for schedule_name in ("linear", "cosine", "sigmoid"):
+        diffusion_obj = ablation.diffusion_objects[schedule_name]
+        alpha_bar_values = diffusion_obj.alphas_cumprod.numpy()
+        schedules_plot_data[schedule_name] = {
+            "timesteps":      np.arange(1000),
+            "betas":          diffusion_obj.betas.numpy(),
+            "alphas_cumprod": alpha_bar_values,
+            "snr":            alpha_bar_values / (1.0 - alpha_bar_values + 1e-8),
         }
-    fig = viz_diffusion.plot_noise_schedule_overview(
-        data, title="Comparativa de Schedules de Ruido: beta, alpha_bar, SNR"
+    figure = viz_diffusion.plot_noise_schedule_overview(
+        schedules_plot_data,
+        title="Comparativa de Schedules de Ruido: beta, alpha_bar, SNR",
     )
-    save(fig, os.path.join(out_dir, "01_noise_schedules.png"), show)
+    save_figure(figure, os.path.join(output_dir, "01_noise_schedules.png"), show_after_saving)
 
 
-# ---------------------------------------------------------------------------
-# 02 - Proceso forward sobre imagen real (sin modelo)
-# ---------------------------------------------------------------------------
-
-def plot_forward_process(dataset_name, image_channels, image_size, out_dir, show):
+def plot_forward_process(dataset_name, num_image_channels, image_size_pixels, output_dir, show_after_saving):
     print(f"\n[2/9] Proceso forward sobre {dataset_name}...")
     from torchvision import datasets, transforms
-    norm = transforms.Normalize([0.5] * image_channels, [0.5] * image_channels)
-    tf = transforms.Compose([transforms.Resize(image_size), transforms.ToTensor(), norm])
+
+    channel_mean_values = [0.5] * num_image_channels
+    channel_std_values  = [0.5] * num_image_channels
+    image_preprocessing_transform = transforms.Compose([
+        transforms.Resize(image_size_pixels),
+        transforms.ToTensor(),
+        transforms.Normalize(channel_mean_values, channel_std_values),
+    ])
     try:
         if dataset_name == "mnist":
-            ds = datasets.MNIST("data/raw", train=False, download=True, transform=tf)
+            reference_dataset = datasets.MNIST(
+                "data/raw", train=False, download=True, transform=image_preprocessing_transform
+            )
         else:
-            ds = datasets.CIFAR10("data/raw", train=False, download=True, transform=tf)
-        x_clean = ds[3][0]
+            reference_dataset = datasets.CIFAR10(
+                "data/raw", train=False, download=True, transform=image_preprocessing_transform
+            )
+        x_clean = reference_dataset[3][0]
     except Exception:
-        x_clean = torch.randn(image_channels, image_size, image_size) * 0.3
+        x_clean = torch.randn(num_image_channels, image_size_pixels, image_size_pixels) * 0.3
 
     betas = make_linear_beta_schedule(1000, 1e-4, 0.02)
-    diff = GaussianDiffusion(betas)
-    timesteps_to_show = [0, 50, 100, 200, 400, 600, 800, 999]
-    noisy = {}
-    noise = torch.randn_like(x_clean.unsqueeze(0))
-    for t in timesteps_to_show[1:]:
-        tb = torch.tensor([t])
-        noisy[t] = diff.q_sample(x_clean.unsqueeze(0), tb, noise)[0]
+    diffusion = GaussianDiffusion(betas)
+    timesteps_to_visualize = [0, 50, 100, 200, 400, 600, 800, 999]
+    noisy_samples_by_timestep = {}
+    fixed_noise = torch.randn_like(x_clean.unsqueeze(0))
+    for timestep_value in timesteps_to_visualize[1:]:
+        timestep_batch = torch.tensor([timestep_value])
+        noisy_samples_by_timestep[timestep_value] = diffusion.q_sample(
+            x_clean.unsqueeze(0), timestep_batch, fixed_noise
+        )[0]
 
-    fig = viz_diffusion.plot_forward_process_strip(
-        x_clean, noisy,
-        title=f"Proceso Forward — {dataset_name.upper()} (schedule lineal)",
+    figure = viz_diffusion.plot_forward_process_strip(
+        x_clean,
+        noisy_samples_by_timestep,
+        title=f"Proceso Forward - {dataset_name.upper()} (schedule lineal)",
     )
-    save(fig, os.path.join(out_dir, f"02_forward_process_{dataset_name}.png"), show)
+    save_figure(figure, os.path.join(output_dir, f"02_forward_process_{dataset_name}.png"), show_after_saving)
 
 
-# ---------------------------------------------------------------------------
-# 03 - Cuadricula de muestras finales
-# ---------------------------------------------------------------------------
-
-def plot_samples_grid(model, diffusion, cfg, out_dir, tag, show):
-    print(f"\n[3/9] Cuadricula de muestras — {tag}...")
-    ic = cfg["dataset"]["image_channels"]
-    isz = cfg["dataset"]["image_size"]
+def plot_samples_grid(model, diffusion, config, output_dir, dataset_tag, show_after_saving):
+    print(f"\n[3/9] Cuadricula de muestras - {dataset_tag}...")
+    num_image_channels = config["dataset"]["image_channels"]
+    image_size_pixels  = config["dataset"]["image_size"]
     with torch.no_grad():
-        samples = diffusion.sample(model, 64, ic, isz, DEVICE)
-    imgs = [samples[i].cpu() for i in range(64)]
-    fig = make_image_grid(
-        imgs, 8, 8,
-        f"64 muestras DDPM — {tag.upper()} (pesos EMA)",
+        generated_samples = diffusion.sample(model, 64, num_image_channels, image_size_pixels, DEVICE)
+    sample_list = [generated_samples[i].cpu() for i in range(64)]
+    figure = make_image_grid_figure(
+        sample_list, 8, 8,
+        f"64 muestras DDPM - {dataset_tag.upper()} (pesos EMA)",
     )
-    save(fig, os.path.join(out_dir, f"03_samples_grid_{tag}.png"), show)
+    save_figure(figure, os.path.join(output_dir, f"03_samples_grid_{dataset_tag}.png"), show_after_saving)
 
 
-# ---------------------------------------------------------------------------
-# 04 - Evolucion de la calidad a distintos pasos de entrenamiento
-# ---------------------------------------------------------------------------
-
-def plot_sample_evolution(config_path, checkpoint_dir, dataset_name, out_dir, show):
-    print(f"\n[4/9] Evolucion de calidad por paso — {dataset_name}...")
-    all_checkpoints = sorted([
-        f for f in os.listdir(checkpoint_dir)
-        if f.startswith("step_") and f.endswith(".pt")
+def plot_sample_evolution(config_path, checkpoint_dir, dataset_name, output_dir, show_after_saving):
+    print(f"\n[4/9] Evolucion de calidad por paso - {dataset_name}...")
+    all_step_checkpoints = sorted([
+        filename for filename in os.listdir(checkpoint_dir)
+        if filename.startswith("step_") and filename.endswith(".pt")
     ])
-    if not all_checkpoints:
-        print("  Sin checkpoints por paso.")
+    if not all_step_checkpoints:
+        print("  Sin checkpoints por paso disponibles.")
         return
 
-    # Elegir ~6 checkpoints distribuidos uniformemente
-    indices = np.linspace(0, len(all_checkpoints) - 1, min(6, len(all_checkpoints))).astype(int)
-    selected = [all_checkpoints[i] for i in indices]
+    num_columns_to_show = min(6, len(all_step_checkpoints))
+    evenly_spaced_indices = np.linspace(0, len(all_step_checkpoints) - 1, num_columns_to_show).astype(int)
+    selected_checkpoint_files = [all_step_checkpoints[idx] for idx in evenly_spaced_indices]
 
-    with open(config_path) as f:
-        cfg = yaml.safe_load(f)
-    mc = cfg["model"]
-    ic  = cfg["dataset"]["image_channels"]
-    isz = cfg["dataset"]["image_size"]
+    with open(config_path) as config_file:
+        config = yaml.safe_load(config_file)
+    model_config       = config["model"]
+    num_image_channels = config["dataset"]["image_channels"]
+    image_size_pixels  = config["dataset"]["image_size"]
     betas = make_linear_beta_schedule(
-        cfg["diffusion"]["num_timesteps"],
-        cfg["diffusion"]["beta_start"],
-        cfg["diffusion"]["beta_end"],
+        config["diffusion"]["num_timesteps"],
+        config["diffusion"]["beta_start"],
+        config["diffusion"]["beta_end"],
     )
-    diff = GaussianDiffusion(betas)
+    diffusion = GaussianDiffusion(betas)
 
-    num_checkpoints = len(selected)
-    fig, axes = plt.subplots(4, num_checkpoints, figsize=(num_checkpoints * 2.0, 9))
-    fig.patch.set_facecolor(BACKGROUND_DARK)
+    figure, axes = plt.subplots(4, num_columns_to_show, figsize=(num_columns_to_show * 2.0, 9))
+    figure.patch.set_facecolor(BACKGROUND_DARK)
 
-    # Usar la misma semilla para todos los checkpoints -> comparacion justa
-    fixed_noise = torch.randn(4, ic, isz, isz, device=DEVICE)
+    fixed_noise_for_comparison = torch.randn(
+        4, num_image_channels, image_size_pixels, image_size_pixels, device=DEVICE
+    )
 
-    for col_idx, ckpt_name in enumerate(selected):
-        step_num = int(ckpt_name.replace("step_", "").replace(".pt", ""))
-        ckpt_path = os.path.join(checkpoint_dir, ckpt_name)
+    for col_idx, checkpoint_filename in enumerate(selected_checkpoint_files):
+        step_number     = int(checkpoint_filename.replace("step_", "").replace(".pt", ""))
+        checkpoint_path = os.path.join(checkpoint_dir, checkpoint_filename)
 
-        model_tmp = UNet(
-            image_channels=ic,
-            base_channels=mc["base_channels"],
-            channel_multipliers=tuple(mc["channel_multipliers"]),
-            num_res_blocks=mc["num_res_blocks"],
-            attention_resolutions=tuple(mc["attention_resolutions"]),
-            dropout=mc["dropout"],
-            num_groups=mc["num_groups"],
+        model_at_step = UNet(
+            image_channels=num_image_channels,
+            base_channels=model_config["base_channels"],
+            channel_multipliers=tuple(model_config["channel_multipliers"]),
+            num_res_blocks=model_config["num_res_blocks"],
+            attention_resolutions=tuple(model_config["attention_resolutions"]),
+            dropout=model_config["dropout"],
+            num_groups=model_config["num_groups"],
         ).to(DEVICE)
-        ema_tmp = ExponentialMovingAverage.from_model(model_tmp)
-        load_checkpoint(ckpt_path, model_tmp, ema_tmp, device=DEVICE)
-        ema_tmp.copy_to(model_tmp.parameters())
-        model_tmp.eval()
+        ema_at_step = ExponentialMovingAverage.from_model(model_at_step)
+        load_checkpoint(checkpoint_path, model_at_step, ema_at_step, device=DEVICE)
+        ema_at_step.copy_to(model_at_step.parameters())
+        model_at_step.eval()
 
         with torch.no_grad():
-            # DDIM 50 pasos para velocidad (misma calidad visual, 20x mas rapido)
-            ddim_fast = DDIMSampler(diff, num_steps=50, eta=0.0)
-            shape = (4, cfg["dataset"]["image_channels"],
-                     cfg["dataset"]["image_size"], cfg["dataset"]["image_size"])
-            x = fixed_noise[:4].clone()
+            ddim_fast = DDIMSampler(diffusion, num_steps=50, eta=0.0)
+            denoised_images = fixed_noise_for_comparison[:4].clone()
             for step_idx in reversed(range(len(ddim_fast.ddim_timesteps))):
-                x = ddim_fast.ddim_step(model_tmp, x, step_idx)
+                denoised_images = ddim_fast.ddim_step(model_at_step, denoised_images, step_idx)
 
         for row_idx in range(4):
             ax = axes[row_idx, col_idx]
             ax.set_facecolor(BACKGROUND_DARK)
             ax.axis("off")
-            img_t = x[row_idx].cpu()
-            if img_t.shape[0] == 1:
-                img_t = img_t.repeat(3, 1, 1)
-            ax.imshow(tensor_to_uint8_image(img_t))
+            image_tensor = denoised_images[row_idx].cpu()
+            if image_tensor.shape[0] == 1:
+                image_tensor = image_tensor.repeat(3, 1, 1)
+            ax.imshow(tensor_to_uint8_image(image_tensor))
             if row_idx == 0:
-                ax.set_title(f"paso\n{step_num:,}", color=COLOR_INDIGO, fontsize=9, fontweight="bold")
+                ax.set_title(f"paso\n{step_number:,}", color=COLOR_INDIGO, fontsize=9, fontweight="bold")
 
-        del model_tmp, ema_tmp
+        del model_at_step, ema_at_step
 
-    fig.suptitle(
-        f"Evolucion de calidad — {dataset_name.upper()} (misma semilla, distintos checkpoints)",
+    figure.suptitle(
+        f"Evolucion de calidad - {dataset_name.upper()} (misma semilla, distintos checkpoints)",
         color=TEXT_PRIMARY, fontsize=12, fontweight="bold", y=1.01,
     )
     plt.tight_layout(pad=0.2)
-    save(fig, os.path.join(out_dir, f"04_sample_evolution_{dataset_name}.png"), show)
+    save_figure(figure, os.path.join(output_dir, f"04_sample_evolution_{dataset_name}.png"), show_after_saving)
 
 
-# ---------------------------------------------------------------------------
-# 05 - Cadena inversa: ruido -> imagen (progressive generation)
-# ---------------------------------------------------------------------------
+def plot_reverse_chain(model, diffusion, config, output_dir, dataset_tag, show_after_saving):
+    print(f"\n[5/9] Cadena inversa - {dataset_tag}...")
+    num_image_channels = config["dataset"]["image_channels"]
+    image_size_pixels  = config["dataset"]["image_size"]
 
-def plot_reverse_chain(model, diffusion, cfg, out_dir, tag, show):
-    print(f"\n[5/9] Cadena inversa — {tag}...")
-    ic  = cfg["dataset"]["image_channels"]
-    isz = cfg["dataset"]["image_size"]
-
-    num_frames = 10
-    save_at = list(range(0, diffusion.num_timesteps, diffusion.num_timesteps // num_frames))
+    num_frames_to_save = 10
+    save_at_timesteps = list(range(
+        0, diffusion.num_timesteps, diffusion.num_timesteps // num_frames_to_save
+    ))
 
     with torch.no_grad():
         _, saved_frames = diffusion.sample_progressive(
-            model, batch_size=4, image_channels=ic, image_size=isz,
-            save_at_timesteps=save_at, device=DEVICE,
+            model,
+            batch_size=4,
+            image_channels=num_image_channels,
+            image_size=image_size_pixels,
+            save_at_timesteps=save_at_timesteps,
+            device=DEVICE,
         )
 
-    saved_frames_sorted = sorted(saved_frames, key=lambda x: x[0], reverse=True)
+    frames_sorted_high_to_low_t = sorted(saved_frames, key=lambda frame_tuple: frame_tuple[0], reverse=True)
 
-    num_cols = len(saved_frames_sorted)
-    fig, axes = plt.subplots(4, num_cols, figsize=(num_cols * 1.8, 8))
-    fig.patch.set_facecolor(BACKGROUND_DARK)
+    num_columns = len(frames_sorted_high_to_low_t)
+    figure, axes = plt.subplots(4, num_columns, figsize=(num_columns * 1.8, 8))
+    figure.patch.set_facecolor(BACKGROUND_DARK)
 
-    for col_idx, (t_val, batch_tensor) in enumerate(saved_frames_sorted):
+    for col_idx, (timestep_value, batch_tensor) in enumerate(frames_sorted_high_to_low_t):
         for row_idx in range(4):
             ax = axes[row_idx, col_idx]
             ax.set_facecolor(BACKGROUND_DARK)
             ax.axis("off")
-            img_t = batch_tensor[row_idx]
-            if img_t.shape[0] == 1:
-                img_t = img_t.repeat(3, 1, 1)
-            ax.imshow(tensor_to_uint8_image(img_t))
+            image_tensor = batch_tensor[row_idx]
+            if image_tensor.shape[0] == 1:
+                image_tensor = image_tensor.repeat(3, 1, 1)
+            ax.imshow(tensor_to_uint8_image(image_tensor))
             if row_idx == 0:
-                ax.set_title(f"t={t_val}", color=TEXT_SECONDARY, fontsize=8)
+                ax.set_title(f"t={timestep_value}", color=TEXT_SECONDARY, fontsize=8)
 
-    fig.suptitle(
-        f"Cadena Inversa — {tag.upper()}: ruido puro -> imagen generada",
+    figure.suptitle(
+        f"Cadena Inversa - {dataset_tag.upper()}: ruido puro -> imagen generada",
         color=TEXT_PRIMARY, fontsize=12, fontweight="bold", y=1.01,
     )
     plt.tight_layout(pad=0.15)
-    save(fig, os.path.join(out_dir, f"05_reverse_chain_{tag}.png"), show)
+    save_figure(figure, os.path.join(output_dir, f"05_reverse_chain_{dataset_tag}.png"), show_after_saving)
 
 
-# ---------------------------------------------------------------------------
-# 06 - DDIM vs DDPM: calidad y velocidad
-# ---------------------------------------------------------------------------
+def plot_ddim_comparison(model, diffusion, config, output_dir, dataset_tag, show_after_saving):
+    print(f"\n[6/9] DDIM vs DDPM - {dataset_tag}...")
+    num_image_channels = config["dataset"]["image_channels"]
+    image_size_pixels  = config["dataset"]["image_size"]
 
-def plot_ddim_comparison(model, diffusion, cfg, out_dir, tag, show):
-    print(f"\n[6/9] DDIM vs DDPM — {tag}...")
-    ic  = cfg["dataset"]["image_channels"]
-    isz = cfg["dataset"]["image_size"]
+    step_configurations = [1000, 100, 50, 20, 10]
+    timing_per_label    = {}
+    samples_per_label   = {}
 
-    step_configs = [1000, 100, 50, 20, 10]
-    timing = {}
-    sample_grids = {}
+    fixed_noise_8_images = torch.randn(8, num_image_channels, image_size_pixels, image_size_pixels, device=DEVICE)
 
-    fixed_noise = torch.randn(8, ic, isz, isz, device=DEVICE)
-
-    for num_steps in step_configs:
-        torch.cuda.synchronize() if DEVICE == "cuda" else None
-        t0 = time.perf_counter()
+    for num_sampling_steps in step_configurations:
+        if DEVICE == "cuda":
+            torch.cuda.synchronize()
+        start_time = time.perf_counter()
 
         with torch.no_grad():
-            if num_steps == 1000:
-                samples = diffusion.sample(model, 8, ic, isz, DEVICE)
-                label = "DDPM T=1000"
+            if num_sampling_steps == 1000:
+                generated_samples = diffusion.sample(model, 8, num_image_channels, image_size_pixels, DEVICE)
+                run_label = "DDPM T=1000"
             else:
-                ddim = DDIMSampler(diffusion, num_steps=num_steps, eta=0.0)
-                samples = ddim.sample(model, 8, ic, isz, DEVICE)
-                label = f"DDIM S={num_steps}"
+                ddim_sampler = DDIMSampler(diffusion, num_steps=num_sampling_steps, eta=0.0)
+                generated_samples = ddim_sampler.sample(model, 8, num_image_channels, image_size_pixels, DEVICE)
+                run_label = f"DDIM S={num_sampling_steps}"
 
-        torch.cuda.synchronize() if DEVICE == "cuda" else None
-        elapsed = time.perf_counter() - t0
-        timing[label] = elapsed
-        sample_grids[label] = [samples[i].cpu() for i in range(8)]
+        if DEVICE == "cuda":
+            torch.cuda.synchronize()
+        elapsed_seconds = time.perf_counter() - start_time
+        timing_per_label[run_label] = elapsed_seconds
+        samples_per_label[run_label] = [generated_samples[i].cpu() for i in range(8)]
 
-    # Panel: muestras + barras de tiempo
-    num_configs = len(step_configs)
-    fig = plt.figure(figsize=(num_configs * 2.2, 12))
-    fig.patch.set_facecolor(BACKGROUND_DARK)
+    num_configurations = len(step_configurations)
+    figure = plt.figure(figsize=(num_configurations * 2.2, 12))
+    figure.patch.set_facecolor(BACKGROUND_DARK)
 
-    # Fila de imagenes por configuracion
-    for col_idx, (label, imgs) in enumerate(sample_grids.items()):
+    for col_idx, (run_label, image_list) in enumerate(samples_per_label.items()):
         for row_idx in range(4):
-            ax = fig.add_subplot(6, num_configs, row_idx * num_configs + col_idx + 1)
+            ax = figure.add_subplot(6, num_configurations, row_idx * num_configurations + col_idx + 1)
             ax.set_facecolor(BACKGROUND_DARK)
             ax.axis("off")
-            img_t = imgs[row_idx]
-            if img_t.shape[0] == 1:
-                img_t = img_t.repeat(3, 1, 1)
-            ax.imshow(tensor_to_uint8_image(img_t))
+            image_tensor = image_list[row_idx]
+            if image_tensor.shape[0] == 1:
+                image_tensor = image_tensor.repeat(3, 1, 1)
+            ax.imshow(tensor_to_uint8_image(image_tensor))
             if row_idx == 0:
-                t_val = timing[label]
-                ax.set_title(f"{label}\n{t_val:.1f}s", color=COLOR_BLUE if "DDIM" in label else COLOR_ROSE,
-                             fontsize=8, fontweight="bold")
+                elapsed = timing_per_label[run_label]
+                label_color = COLOR_BLUE if "DDIM" in run_label else COLOR_ROSE
+                ax.set_title(f"{run_label}\n{elapsed:.1f}s", color=label_color, fontsize=8, fontweight="bold")
 
-    # Panel de speedup
-    ax_bar = fig.add_subplot(6, 1, 6)
-    ax_bar.set_facecolor(AXES_BACKGROUND)
-    labels_list = list(timing.keys())
-    times_list  = list(timing.values())
-    colors_list = [COLOR_ROSE if "DDPM" in l else COLOR_BLUE for l in labels_list]
-    bars = ax_bar.bar(labels_list, times_list, color=colors_list, alpha=0.85, edgecolor=BORDER_COLOR)
-    for bar, t_val in zip(bars, times_list):
-        ax_bar.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.05,
-                    f"{t_val:.1f}s", ha="center", color=TEXT_SECONDARY, fontsize=8)
-    ax_bar.set_ylabel("Segundos (8 imagenes)", color=TEXT_SECONDARY, fontsize=9)
-    ax_bar.tick_params(colors=TEXT_SECONDARY)
-    for spine in ax_bar.spines.values():
+    ax_speedup_bars = figure.add_subplot(6, 1, 6)
+    ax_speedup_bars.set_facecolor(AXES_BACKGROUND)
+    bar_labels  = list(timing_per_label.keys())
+    bar_times   = list(timing_per_label.values())
+    bar_colors  = [COLOR_ROSE if "DDPM" in label else COLOR_BLUE for label in bar_labels]
+    bars = ax_speedup_bars.bar(bar_labels, bar_times, color=bar_colors, alpha=0.85, edgecolor=BORDER_COLOR)
+    for bar, elapsed in zip(bars, bar_times):
+        ax_speedup_bars.text(
+            bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.05,
+            f"{elapsed:.1f}s", ha="center", color=TEXT_SECONDARY, fontsize=8,
+        )
+    ax_speedup_bars.set_ylabel("Segundos (8 imagenes)", color=TEXT_SECONDARY, fontsize=9)
+    ax_speedup_bars.tick_params(colors=TEXT_SECONDARY)
+    for spine in ax_speedup_bars.spines.values():
         spine.set_color(BORDER_COLOR)
-    ax_bar.set_facecolor(AXES_BACKGROUND)
-    ddpm_time = timing.get("DDPM T=1000", 1)
-    for label, t_val in timing.items():
-        if "DDIM" in label:
-            speedup = ddpm_time / t_val
-            print(f"  {label}: {t_val:.2f}s  ({speedup:.1f}x speedup vs DDPM)")
+    ax_speedup_bars.set_facecolor(AXES_BACKGROUND)
+    baseline_ddpm_time = timing_per_label.get("DDPM T=1000", 1)
+    for run_label, elapsed in timing_per_label.items():
+        if "DDIM" in run_label:
+            speedup_factor = baseline_ddpm_time / elapsed
+            print(f"  {run_label}: {elapsed:.2f}s  ({speedup_factor:.1f}x speedup vs DDPM)")
 
-    fig.suptitle(f"DDPM vs DDIM — {tag.upper()} (misma semilla, pesos EMA)",
-                 color=TEXT_PRIMARY, fontsize=12, fontweight="bold")
+    figure.suptitle(
+        f"DDPM vs DDIM - {dataset_tag.upper()} (misma semilla, pesos EMA)",
+        color=TEXT_PRIMARY, fontsize=12, fontweight="bold",
+    )
     plt.tight_layout(pad=0.3)
-    save(fig, os.path.join(out_dir, f"06_ddim_vs_ddpm_{tag}.png"), show)
+    save_figure(figure, os.path.join(output_dir, f"06_ddim_vs_ddpm_{dataset_tag}.png"), show_after_saving)
 
 
-# ---------------------------------------------------------------------------
-# 07 - Interpolacion en espacio latente
-# ---------------------------------------------------------------------------
-
-def plot_interpolation(model, diffusion, cfg, out_dir, tag, show):
-    print(f"\n[7/9] Interpolacion en espacio latente — {tag}...")
+def plot_interpolation(model, diffusion, config, output_dir, dataset_tag, show_after_saving):
+    print(f"\n[7/9] Interpolacion en espacio latente - {dataset_tag}...")
     from torchvision import datasets, transforms
-    ic  = cfg["dataset"]["image_channels"]
-    isz = cfg["dataset"]["image_size"]
 
-    norm = transforms.Normalize([0.5] * ic, [0.5] * ic)
-    tf   = transforms.Compose([transforms.Resize(isz), transforms.ToTensor(), norm])
+    num_image_channels = config["dataset"]["image_channels"]
+    image_size_pixels  = config["dataset"]["image_size"]
+
+    channel_mean_values = [0.5] * num_image_channels
+    channel_std_values  = [0.5] * num_image_channels
+    image_preprocessing_transform = transforms.Compose([
+        transforms.Resize(image_size_pixels),
+        transforms.ToTensor(),
+        transforms.Normalize(channel_mean_values, channel_std_values),
+    ])
     try:
-        if "mnist" in cfg["dataset"]["name"]:
-            ds = datasets.MNIST("data/raw", train=False, download=True, transform=tf)
+        if "mnist" in config["dataset"]["name"]:
+            reference_dataset = datasets.MNIST(
+                "data/raw", train=False, download=True, transform=image_preprocessing_transform
+            )
         else:
-            ds = datasets.CIFAR10("data/raw", train=False, download=True, transform=tf)
-        x_a = ds[0][0].unsqueeze(0).to(DEVICE)
-        x_b = ds[7][0].unsqueeze(0).to(DEVICE)
+            reference_dataset = datasets.CIFAR10(
+                "data/raw", train=False, download=True, transform=image_preprocessing_transform
+            )
+        first_reference_image  = reference_dataset[0][0].unsqueeze(0).to(DEVICE)
+        second_reference_image = reference_dataset[7][0].unsqueeze(0).to(DEVICE)
     except Exception:
-        x_a = torch.randn(1, ic, isz, isz, device=DEVICE)
-        x_b = torch.randn(1, ic, isz, isz, device=DEVICE)
+        first_reference_image  = torch.randn(1, num_image_channels, image_size_pixels, image_size_pixels, device=DEVICE)
+        second_reference_image = torch.randn(1, num_image_channels, image_size_pixels, image_size_pixels, device=DEVICE)
 
-    interpolator = LatentSpaceInterpolator(diffusion, interpolation_t=400, num_interpolation_steps=9)
-    decoded, lambdas = interpolator.generate_interpolation_grid(
-        model, x_a, x_b, noise_seed=42, device=DEVICE, ddim_steps=50,
+    interpolator = LatentSpaceInterpolator(
+        diffusion, interpolation_t=400, num_interpolation_steps=9
+    )
+    decoded_interpolation_images, lambda_values = interpolator.generate_interpolation_grid(
+        model, first_reference_image, second_reference_image,
+        noise_seed=42, device=DEVICE, ddim_steps=50,
     )
 
-    num_imgs = len(decoded)
-    fig, axes = plt.subplots(1, num_imgs + 2, figsize=((num_imgs + 2) * 2.0, 2.6))
-    fig.patch.set_facecolor(BACKGROUND_DARK)
+    num_interpolated_images = len(decoded_interpolation_images)
+    figure, axes = plt.subplots(1, num_interpolated_images + 2, figsize=((num_interpolated_images + 2) * 2.0, 2.6))
+    figure.patch.set_facecolor(BACKGROUND_DARK)
 
-    for ax, label, img_t in [
-        (axes[0], "Original A", x_a[0].cpu()),
-        *[(axes[i + 1], f"lambda={l:.2f}", decoded[i][0]) for i, l in enumerate(lambdas)],
-        (axes[-1], "Original B", x_b[0].cpu()),
-    ]:
+    panels_to_draw = (
+        [(axes[0], "Original A", first_reference_image[0].cpu())]
+        + [(axes[i + 1], f"lambda={lam:.2f}", decoded_interpolation_images[i][0])
+           for i, lam in enumerate(lambda_values)]
+        + [(axes[-1], "Original B", second_reference_image[0].cpu())]
+    )
+    for ax, panel_label, image_tensor in panels_to_draw:
         ax.set_facecolor(BACKGROUND_DARK)
         ax.axis("off")
-        if img_t.shape[0] == 1:
-            img_t = img_t.repeat(3, 1, 1)
-        ax.imshow(tensor_to_uint8_image(img_t))
-        ax.set_title(label, color=COLOR_VIOLET, fontsize=7.5, fontweight="bold")
+        display_tensor = image_tensor if image_tensor.shape[0] != 1 else image_tensor.repeat(3, 1, 1)
+        ax.imshow(tensor_to_uint8_image(display_tensor))
+        ax.set_title(panel_label, color=COLOR_VIOLET, fontsize=7.5, fontweight="bold")
 
-    fig.suptitle(
-        f"Interpolacion en Espacio Latente — {tag.upper()} (t_interp=400, DDIM S=50)",
+    figure.suptitle(
+        f"Interpolacion en Espacio Latente - {dataset_tag.upper()} (t_interp=400, DDIM S=50)",
         color=TEXT_PRIMARY, fontsize=11, fontweight="bold", y=1.04,
     )
     plt.tight_layout(pad=0.2)
-    save(fig, os.path.join(out_dir, f"07_interpolation_{tag}.png"), show)
+    save_figure(figure, os.path.join(output_dir, f"07_interpolation_{dataset_tag}.png"), show_after_saving)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+def main(show_after_saving, target_dataset, override_checkpoint_path):
+    mnist_config_path  = "configs/mnist.yaml"
+    cifar_config_path  = "configs/cifar10.yaml"
+    mnist_output_dir   = "checkpoints/mnist/plots"
+    cifar_output_dir   = "checkpoints/cifar10/plots"
 
-def main(show: bool):
-    mnist_cfg      = "configs/mnist.yaml"
-    cifar_cfg      = "configs/cifar10.yaml"
-    mnist_ckpt     = "checkpoints/mnist/best.pt"
-    cifar_ckpt     = "checkpoints/cifar10/latest.pt"
-    mnist_out      = "checkpoints/mnist/plots"
-    cifar_out      = "checkpoints/cifar10/plots"
-
-    # ---- Graficas sin modelo ----
-    plot_noise_schedules(cifar_out, show)
-    plot_forward_process("mnist",  1, 28, mnist_out, show)
-    plot_forward_process("cifar10", 3, 32, cifar_out, show)
-
-    # ---- MNIST (modelo completo) ----
-    if os.path.exists(mnist_ckpt):
-        model_m, diff_m, cfg_m = load_model_from_config(mnist_cfg, mnist_ckpt, DEVICE)
-        plot_samples_grid(model_m, diff_m, cfg_m, mnist_out, "mnist", show)
-        plot_sample_evolution(mnist_cfg, "checkpoints/mnist", "mnist", mnist_out, show)
-        plot_reverse_chain(model_m, diff_m, cfg_m, mnist_out, "mnist", show)
-        plot_ddim_comparison(model_m, diff_m, cfg_m, mnist_out, "mnist", show)
-        plot_interpolation(model_m, diff_m, cfg_m, mnist_out, "mnist", show)
-        del model_m
+    # Checkpoint activo: --checkpoint sobreescribe el default.
+    # Por defecto MNIST usa best.pt (ya convergio) y CIFAR-10 usa latest.pt (en progreso).
+    if override_checkpoint_path and target_dataset != "both":
+        mnist_checkpoint_path = override_checkpoint_path if target_dataset == "mnist"  else "checkpoints/mnist/best.pt"
+        cifar_checkpoint_path = override_checkpoint_path if target_dataset == "cifar10" else "checkpoints/cifar10/latest.pt"
     else:
-        print("Sin checkpoint de MNIST, saltando graficas del modelo.")
+        mnist_checkpoint_path = "checkpoints/mnist/best.pt"
+        cifar_checkpoint_path = "checkpoints/cifar10/latest.pt"
 
-    # ---- CIFAR-10 (checkpoint parcial) ----
-    if os.path.exists(cifar_ckpt):
-        model_c, diff_c, cfg_c = load_model_from_config(cifar_cfg, cifar_ckpt, DEVICE)
-        plot_samples_grid(model_c, diff_c, cfg_c, cifar_out, "cifar10", show)
-        plot_sample_evolution(cifar_cfg, "checkpoints/cifar10", "cifar10", cifar_out, show)
-        plot_reverse_chain(model_c, diff_c, cfg_c, cifar_out, "cifar10", show)
-        del model_c
-    else:
-        print("Sin checkpoint de CIFAR-10.")
+    run_mnist  = target_dataset in ("mnist",  "both")
+    run_cifar  = target_dataset in ("cifar10", "both")
+
+    no_model_output_dir = cifar_output_dir if run_cifar else mnist_output_dir
+    plot_noise_schedules(no_model_output_dir, show_after_saving)
+
+    if run_mnist:
+        plot_forward_process("mnist", 1, 28, mnist_output_dir, show_after_saving)
+    if run_cifar:
+        plot_forward_process("cifar10", 3, 32, cifar_output_dir, show_after_saving)
+
+    if run_mnist:
+        if os.path.exists(mnist_checkpoint_path):
+            model_mnist, diffusion_mnist, config_mnist = load_model_from_config(
+                mnist_config_path, mnist_checkpoint_path, DEVICE
+            )
+            plot_samples_grid(model_mnist, diffusion_mnist, config_mnist, mnist_output_dir, "mnist", show_after_saving)
+            plot_sample_evolution(mnist_config_path, "checkpoints/mnist", "mnist", mnist_output_dir, show_after_saving)
+            plot_reverse_chain(model_mnist, diffusion_mnist, config_mnist, mnist_output_dir, "mnist", show_after_saving)
+            plot_ddim_comparison(model_mnist, diffusion_mnist, config_mnist, mnist_output_dir, "mnist", show_after_saving)
+            plot_interpolation(model_mnist, diffusion_mnist, config_mnist, mnist_output_dir, "mnist", show_after_saving)
+            del model_mnist
+        else:
+            print(f"Sin checkpoint de MNIST en {mnist_checkpoint_path}, saltando graficas del modelo.")
+
+    if run_cifar:
+        if os.path.exists(cifar_checkpoint_path):
+            model_cifar, diffusion_cifar, config_cifar = load_model_from_config(
+                cifar_config_path, cifar_checkpoint_path, DEVICE
+            )
+            plot_samples_grid(model_cifar, diffusion_cifar, config_cifar, cifar_output_dir, "cifar10", show_after_saving)
+            plot_sample_evolution(cifar_config_path, "checkpoints/cifar10", "cifar10", cifar_output_dir, show_after_saving)
+            plot_reverse_chain(model_cifar, diffusion_cifar, config_cifar, cifar_output_dir, "cifar10", show_after_saving)
+            del model_cifar
+        else:
+            print(f"Sin checkpoint de CIFAR-10 en {cifar_checkpoint_path}.")
 
     print("\nListo. Graficas guardadas en:")
-    print(f"  {mnist_out}/")
-    print(f"  {cifar_out}/")
+    if run_mnist:
+        print(f"  {mnist_output_dir}/")
+    if run_cifar:
+        print(f"  {cifar_output_dir}/")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--show", action="store_true")
+    parser = argparse.ArgumentParser(description="Genera todas las graficas del proyecto DDPM.")
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Mostrar cada grafica en ventana ademas de guardarla.",
+    )
+    parser.add_argument(
+        "--dataset",
+        choices=["mnist", "cifar10", "both"],
+        default="both",
+        help=(
+            "Que dataset procesar. "
+            "mnist: solo MNIST (modelo ya entrenado). "
+            "cifar10: solo CIFAR-10 (checkpoint en progreso). "
+            "both: ambos (default)."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Ruta exacta al checkpoint que se quiere usar. "
+            "Requiere --dataset mnist o --dataset cifar10 (no funciona con both). "
+            "Ejemplos: "
+            "checkpoints/cifar10/latest.pt, "
+            "checkpoints/cifar10/step_0100000.pt, "
+            "checkpoints/cifar10/best.pt"
+        ),
+    )
     args = parser.parse_args()
-    main(args.show)
+
+    if args.checkpoint and args.dataset == "both":
+        print(
+            "Advertencia: --checkpoint se ignora cuando --dataset es 'both'. "
+            "Usa --dataset mnist o --dataset cifar10 para especificar un checkpoint concreto."
+        )
+
+    main(args.show, args.dataset, args.checkpoint)
