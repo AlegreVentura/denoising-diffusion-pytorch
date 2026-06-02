@@ -512,6 +512,8 @@ def main(show_after_saving, target_dataset, override_checkpoint_path):
             plot_samples_grid(model_cifar, diffusion_cifar, config_cifar, cifar_output_dir, "cifar10", show_after_saving)
             plot_sample_evolution(cifar_config_path, "checkpoints/cifar10", "cifar10", cifar_output_dir, show_after_saving)
             plot_reverse_chain(model_cifar, diffusion_cifar, config_cifar, cifar_output_dir, "cifar10", show_after_saving)
+            plot_ddim_comparison(model_cifar, diffusion_cifar, config_cifar, cifar_output_dir, "cifar10", show_after_saving)
+            plot_interpolation(model_cifar, diffusion_cifar, config_cifar, cifar_output_dir, "cifar10", show_after_saving)
             del model_cifar
         else:
             print(f"Sin checkpoint de CIFAR-10 en {cifar_checkpoint_path}.")
